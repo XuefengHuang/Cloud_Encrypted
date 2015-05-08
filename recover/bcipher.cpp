@@ -1,0 +1,281 @@
+#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <stdio.h>
+#include <string>
+#include "cryptopp/osrng.h"
+#include "cryptopp/modes.h"
+#include "cryptopp/aes.h"
+#include "cryptopp/filters.h"
+#include "cryptopp/rsa.h"
+#include "cryptopp/pssr.h"
+#include <cryptopp/files.h>
+#include <cryptopp/base64.h>
+#include "bcipher.h"
+#include "hexa.h"
+#include "hashmac.h"
+#include "sha256.h"
+using namespace CryptoPP;
+
+const int HMAC_KEYLENGTH = 16;
+
+void BCipher::decrypt(std::string fkfile,std::string filename,std::string encryptedfile,std::string decryptedfile,std::string content,std::string signature){
+	AutoSeededRandomPool rng;
+        RSA::PrivateKey privateKey;
+        {
+         FileSource input("receiver_private.dat", true);
+         privateKey.BERDecode(input);
+        }
+
+        RSA::PublicKey publicKey;
+        {
+         FileSource input("receiver_public.dat", true);
+         publicKey.BERDecode(input);
+        }
+
+	//InvertibleRSAFunction params;
+	//params.GenerateRandomWithKeySize(rng, 3072);
+
+	//RSA::PrivateKey privateKey(params);
+	//RSA::PublicKey publicKey(params);
+	std::cout<<"Sending public key to sender..."<<std::endl;
+	std::string plain, cipher, recovered, cipher1,hmaccontents;
+	std::stringstream ss;
+        //read key file
+	std::ifstream infk(fkfile.c_str());
+	ss << infk.rdbuf();
+	std::string fk = ss.str();
+	ss.str("");
+	infk.close();
+	plain=fk;
+        
+        //read HMAC file
+	std::ifstream inmd5(("hmac_"+encryptedfile).c_str());
+	ss << inmd5.rdbuf();
+	//std::string hmaccontents = ss.str();
+        std::string hmac = ss.str();
+	ss.str("");
+	inmd5.close();
+
+	// Encryption
+	std::cout<<"User encrypting key and HMAC of uploaded file with public key..."<<std::endl;
+	RSAES_OAEP_SHA_Encryptor e(publicKey);
+
+	StringSource ss1(plain, true,
+	    new PK_EncryptorFilter(rng, e,
+	        new StringSink(cipher)
+	   ) // PK_EncryptorFilter
+	); // StringSource
+
+	StringSource ss3(hmac, true,
+	    new PK_EncryptorFilter(rng, e,
+	        new StringSink(cipher1)
+	   ) // PK_EncryptorFilter
+	); // StringSource
+        
+	std::cout<<"Encryption Complete.\nSender now sharing the encrypted key and HMAC of uploaded file over unsecure channel..."<<std::endl;
+
+        std::ofstream encrtptedkey("ekey.txt");
+	encrtptedkey << cipher;
+        encrtptedkey.close();
+
+        std::ofstream encrtptedhmac("ehmac_efile.txt");
+	encrtptedhmac << cipher1;
+        encrtptedhmac.close();
+
+	std::cout<<"Peer receives the encrypted files."<<std::endl;
+	std::cout<<"Decrypting the files using his private key..."<<std::endl;
+
+	// Decryption
+	RSAES_OAEP_SHA_Decryptor d(privateKey);
+
+	StringSource ss2(cipher, true,
+	    new PK_DecryptorFilter(rng, d,
+	        new StringSink(recovered)
+	   ) // PK_DecryptorFilter
+	); // StringSource
+
+	StringSource ss4(cipher1, true,
+	    new PK_DecryptorFilter(rng, d,
+	        new StringSink(hmaccontents)
+	   ) // PK_DecryptorFilter
+	); // StringSource
+
+	fk=recovered;
+
+        std::cout<<"====================================================================="<<std::endl;
+        //check if file is what I want.
+        authorize(filename);
+        std::cout<<"====================================================================="<<std::endl;
+        // verify digital signature.     
+        verify_signature(content,signature);
+        std::cout<<"====================================================================="<<std::endl;
+
+	Hexa b;
+	std::string hmackey = fk.substr(AES::MAX_KEYLENGTH*2 + AES::BLOCKSIZE*2,HMAC_KEYLENGTH*2);
+	std::string skey = fk.substr(0,AES::MAX_KEYLENGTH*2);
+	std::string siv = fk.substr(AES::MAX_KEYLENGTH*2,AES::BLOCKSIZE*2);
+        //std::cout<<hmackey<<std::endl;
+        //std::cout<<skey<<std::endl;
+        //std::cout<<siv<<std::endl;
+
+	// Get key in byte form from hex
+	byte *key=b.hex_to_byte_decoder(skey);
+
+	// Get iv in byte form from hex
+	byte *iv=b.hex_to_byte_decoder(siv);
+
+	// Get cipher text from file
+	std::ifstream in(encryptedfile.c_str());
+	ss << in.rdbuf();
+	std::string input=ss.str();
+	size_t len = input.length();
+	int ctlen = len/2;
+	ss.str("");
+	in.close();
+
+
+
+	std::cout<<"Checking HMAC of downloaded file ..."<<std::endl;
+	HashMac h;
+	if(h.verify_hmac(hmackey,input,hmaccontents)){
+		std::cout<<"File authenticated and integrity maintained!"<<std::endl;
+	}
+	else{
+		std::cout<<"File could not be authenticated!"<<std::endl;
+                return;
+	}
+
+	// Convert ciphertext to bytes from hex
+	byte *ciphertext=b.hex_to_byte_decoder(input);
+
+	unsigned char *plaintext = new unsigned char[ctlen+1];
+	plaintext[ctlen]='\0';
+
+        std::cout<<"====================================================================="<<std::endl;
+
+	// Decrypt the file and store contents to file
+	CFB_Mode<AES>::Decryption cfbDecryption(key, AES::MAX_KEYLENGTH, iv);
+	cfbDecryption.ProcessData(plaintext, ciphertext, ctlen+1);
+	std::string x = b.byte_to_hex_encoder(plaintext,ctlen);
+	std::ofstream outfinal(decryptedfile.c_str());
+	outfinal << x;
+	outfinal.close();
+        std::cout<<"Succeed! You can check file_recovered.txt"<<std::endl;
+}
+
+void BCipher::generateRSAkeys(){
+	std::cout<<"Generating RSA keys for receiver..."<<std::endl;
+	// Generate keys
+	AutoSeededRandomPool rng;
+
+	InvertibleRSAFunction params;
+	params.GenerateRandomWithKeySize(rng, 3072);
+
+	RSA::PrivateKey privateKey(params);
+	RSA::PublicKey publicKey(params);
+{
+        FileSink output("receiver_private.dat");
+        privateKey.DEREncode(output);
+}
+{
+        FileSink output("receiver_public.dat");
+        publicKey.DEREncode(output);
+}
+        std::cout<<"Produce receiver_private.dat and receiver_public.dat" <<std::endl;
+}
+void BCipher::authorize(std::string filename){
+        std::string keyfile,signature,cipher1,sfilename,efilename;
+	std::cout<<"Setting Up Environment" <<std::endl;
+        Hexa h;
+	h.string_to_hex_encoder(filename);
+	std::cout<<"Environment Set"<<std::endl;
+        std::cout<<"====================================================================="<<std::endl; 
+
+        //Authorize phase	
+        std::cout<<"Authorize Phase."<<std::endl;
+        sha256_pre(filename,"sfilename.txt");
+        h.hex_to_string_decoder1(filename);
+
+	std::ifstream in1("sfilename.txt");
+	std::stringstream ss1;
+	ss1<< in1.rdbuf();
+	sfilename = ss1.str();
+	in1.close();
+
+	std::ifstream in2("efilename.txt");
+	std::stringstream ss2;
+	ss2<< in2.rdbuf();
+	efilename = ss2.str();
+	in2.close();
+        //std::cout<<sfilename<<std::endl;
+        //std::cout<<efilename<<std::endl;
+        if(sfilename.compare(efilename) ==0){
+        std::cout<<"We can find the file from cloud server."<<std::endl;
+	std::cout<<"Authorize Phase complete"<<std::endl;
+        std::cout<<"Downloading file......"<<std::endl;
+        }else{
+        std::cout<<"Authorize Failed! We can't find file from cloud server."<<std::endl;
+        return;
+        }
+
+
+}
+// Perform SHA256 and store to file
+void BCipher::sha256_pre(std::string filename,std::string savefilename){
+	std::ifstream in(filename.c_str());
+	std::stringstream ss;
+	ss<< in.rdbuf();
+	std::string input = ss.str();
+	in.close();
+
+        SHA256_new sha256;
+	std::string myHash = sha256(input);
+	std::ofstream out(savefilename.c_str());
+	out << myHash;
+	out.close();
+}
+
+std::string BCipher::signature(std::string content){
+        std::string keyfile,signature,cipher1;	
+        std::cout<<"Begin to implement digital signature"<<std::endl;         
+        RSA::PrivateKey rsaPrivate;
+        std::cout<<"Signature by sender's private key"<<std::endl;
+        {
+         FileSource input("sender_private.dat", true);
+         rsaPrivate.BERDecode(input);
+        }
+        RSASSA_PKCS1v15_SHA_Signer signer(rsaPrivate);
+        AutoSeededRandomPool rng;
+        StringSource ss3(content, true, 
+            new SignerFilter(rng, signer,
+                new StringSink(cipher1)
+           ) // SignerFilter
+        ); // StringSource
+
+        std::cout<<"Sending files to cloud server"<<std::endl;
+        return cipher1;
+
+}
+
+void BCipher::verify_signature(std::string content,std::string signature){
+        std::cout<<"Receiver verifies signature using sender's publickey"<<std::endl;
+        RSA::PublicKey rsaPublickey;
+        {
+         FileSource input("sender_public.dat", true);
+         rsaPublickey.BERDecode(input);
+        }
+ 
+	RSASSA_PKCS1v15_SHA_Verifier verifier(rsaPublickey);
+        StringSource ss4(content + signature, true,
+           new SignatureVerificationFilter(
+               verifier, NULL,
+               SignatureVerificationFilter::THROW_EXCEPTION
+          ) // SignatureVerificationFilter
+        ); // StringSource
+
+        std::cout << "Verified signature on message" << std::endl;
+
+}
+

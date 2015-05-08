@@ -1,0 +1,11 @@
+#ifndef __BCIPHER_H_INCLUDED_
+#define __BCIPHER_H_INCLUDED_
+
+class BCipher{
+public:
+	void encrypt(std::string keyfile,std::string file,std::string savefile);
+        void sha256_pre(std::string filename,std::string savefilename);
+        void signature(std::string content,std::string filename);
+        void generateRSAkeys();
+};
+#endif
